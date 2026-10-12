@@ -1,0 +1,25 @@
+{
+  "title": "Enterprise AI Chatbot",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Chat Latency",
+      "targets": [
+        {
+          "expr": "rate(chatbot_chat_latency_seconds_sum[5m]) / rate(chatbot_chat_latency_seconds_count[5m])"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool Calls",
+      "targets": [
+        {
+          "expr": "sum by (tool, success) (rate(chatbot_tool_calls_total[5m]))"
+        }
+      ]
+    }
+  ]
+}
+

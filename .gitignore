@@ -1,0 +1,50 @@
+# Local secrets and credentials (keep the configuration template)
+.env
+.env.*
+!.env.example
+.aws/
+*.pem
+*.key
+
+# Python environments, bytecode, packaging, and test/tool caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+
+# Runtime data, private uploads, logs, and generated artifacts
+sample_data/uploads/
+output/
+tmp/
+*.log
+*.log.*
+*.sqlite
+*.sqlite3
+*.db
+.streamlit/secrets.toml
+qdrant_storage/
+
+# Local editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
