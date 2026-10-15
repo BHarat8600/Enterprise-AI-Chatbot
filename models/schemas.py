@@ -1,13 +1,14 @@
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class ToolName(str, Enum):
     sql = "sql"
+    postgresql = "postgresql"
     pdf = "pdf"
     document = "document"
     rag = "rag"
@@ -101,7 +102,30 @@ class EvaluationMetrics(BaseModel):
     tool_success_rate: float = 0.0
 
 
+class DatabaseConfig(BaseModel):
+    engine: Literal["sqlserver", "postgresql"] = "sqlserver"
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    database: str | None = None
+    username: str | None = None
+    password: SecretStr | None = Field(default=None, repr=False)
+    trusted_connection: bool | None = None
+    driver: str | None = None
+    dsn: str | None = None
+    encrypt: bool | None = None
+    sslmode: Literal["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] | None = None
+
+
+class DatabaseExecuteRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    sql: str = Field(min_length=1, max_length=100000)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+
+
 class ChatRequest(BaseModel):
+    deep_sql_automatic_mode: bool = False
+    database: DatabaseConfig | None = None
+    defer_database_execution: bool = False
     automatic_mode: bool = False
     query: str
     session_id: str = Field(default_factory=lambda: str(uuid4()))

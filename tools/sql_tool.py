@@ -1,6 +1,7 @@
 from time import perf_counter
 from typing import Any
 import re
+from contextlib import contextmanager
 
 import sqlparse
 
@@ -186,22 +187,43 @@ class SqlServerTool:
                 count += len(batch)
             return {"rows": rows, "row_count": count, "columns": columns, "column_count": len(columns)}
 
+    @contextmanager
+    def query_cursor(self, sql):
+        import pyodbc
+        with pyodbc.connect(self.connection_string(), timeout=15) as connection:
+            connection.timeout = 60
+            cursor = connection.cursor()
+            try:
+                cursor.execute(sql)
+                yield cursor
+            finally:
+                cursor.close()
+
     def connection_string(self) -> str:
+        def quoted(value):
+            return "{" + str(value or "").replace("}", "}}") + "}"
         if self.settings.sqlserver_dsn:
-            return f"DSN={self.settings.sqlserver_dsn};"
+            value = f"DSN={quoted(self.settings.sqlserver_dsn)};"
+            if self.settings.sqlserver_database:
+                value += f"DATABASE={quoted(self.settings.sqlserver_database)};"
+            if self.settings.sqlserver_user:
+                value += f"UID={quoted(self.settings.sqlserver_user)};"
+            if self.settings.sqlserver_password:
+                value += f"PWD={quoted(self.settings.sqlserver_password)};"
+            return value
         if not self.settings.sqlserver_host:
             raise ValueError("SQLSERVER_HOST is not configured")
         if self.settings.sqlserver_trusted_connection:
             return (
-                f"DRIVER={{{self.settings.sqlserver_driver}}};"
-                f"SERVER={self.settings.sqlserver_host};DATABASE={self.settings.sqlserver_database};"
+                f"DRIVER={quoted(self.settings.sqlserver_driver)};"
+                f"SERVER={quoted(self.settings.sqlserver_host)};DATABASE={quoted(self.settings.sqlserver_database)};"
                 f"Trusted_Connection=yes;Encrypt={self._yes_no(self.settings.sqlserver_encrypt)};"
                 "TrustServerCertificate=yes;"
             )
         return (
-            f"DRIVER={{{self.settings.sqlserver_driver}}};"
-            f"SERVER={self.settings.sqlserver_host};DATABASE={self.settings.sqlserver_database};"
-            f"UID={self.settings.sqlserver_user};PWD={self.settings.sqlserver_password};"
+            f"DRIVER={quoted(self.settings.sqlserver_driver)};"
+            f"SERVER={quoted(self.settings.sqlserver_host)};DATABASE={quoted(self.settings.sqlserver_database)};"
+            f"UID={quoted(self.settings.sqlserver_user)};PWD={quoted(self.settings.sqlserver_password)};"
             f"Encrypt={self._yes_no(self.settings.sqlserver_encrypt)};TrustServerCertificate=yes;"
         )
 

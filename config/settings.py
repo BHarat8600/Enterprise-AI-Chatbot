@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     sqlserver_driver: str = Field(default="ODBC Driver 18 for SQL Server")
     sqlserver_trusted_connection: bool = True
     sqlserver_encrypt: bool = False
+    postgresql_host: str | None = None
+    postgresql_port: int = 5432
+    postgresql_database: str | None = None
+    postgresql_user: str | None = None
+    postgresql_password: str | None = None
+    postgresql_sslmode: str = "prefer"
+    deep_sql_max_rounds: int = Field(default=20, ge=2, le=60)
+    deep_sql_distinct_limit: int = Field(default=50, ge=5, le=200)
+    deep_sql_step_seconds: float = Field(default=15, ge=0, le=60)
+    deep_sql_large_step_seconds: float = Field(default=30, ge=0, le=120)
+    deep_sql_large_token_threshold: int = Field(default=4000, ge=1)
 
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
@@ -59,6 +70,10 @@ class Settings(BaseSettings):
         "sqlserver_database",
         "sqlserver_user",
         "sqlserver_password",
+        "postgresql_host",
+        "postgresql_database",
+        "postgresql_user",
+        "postgresql_password",
         "langfuse_public_key",
         "langfuse_secret_key",
         "otel_exporter_otlp_endpoint",

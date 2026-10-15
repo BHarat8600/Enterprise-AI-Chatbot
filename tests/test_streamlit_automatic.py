@@ -6,8 +6,10 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 
-def test_automatic_toggle_and_streamed_result_render_without_exception():
-    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "ui" / "streamlit_app.py").run()
+@patch("httpx.get")
+def test_automatic_toggle_and_streamed_result_render_without_exception(get):
+    get.return_value.json.return_value = {}
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "ui" / "streamlit_app.py", default_timeout=10).run()
     assert not app.exception
     assert app.toggle[0].label == "Automatic Mode"
     app.toggle[0].set_value(True).run()
