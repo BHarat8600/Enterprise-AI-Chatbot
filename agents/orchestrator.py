@@ -20,6 +20,11 @@ from tools.pdf_tool import PdfTool
 from tools.sql_tool import SqlServerTool
 from agents.database_agent import DatabaseAgent
 from services.progress import progress, progress_sink
+from services.database_connections import database_tool
+from models.schemas import DatabaseConfig
+from config.settings import get_settings
+from agents.deep_sql_agent import DeepSqlAgent
+from models.schemas import ToolCall
 
 
 class AgentOrchestrator:
@@ -34,6 +39,7 @@ class AgentOrchestrator:
     ):
         self.memory = memory
         llm = MeteredClient(llm)
+        self.llm = llm
         self.guardrails = GuardrailAgent()
         self.planner = PlannerAgent(llm)
         self.database_agent = DatabaseAgent(llm, sql_tool)
@@ -119,11 +125,28 @@ class AgentOrchestrator:
         self.memory.add(request.session_id, ChatMessage(role="user", content=query))
         await progress("Input checks", "Completed")
         await progress("Planning and tool selection", "In Progress", "Determining required sources and tools")
-        plan = await self.planner.plan(query, request.files, memory, automatic_mode=request.automatic_mode)
+        engine = request.database.engine if request.database else ("postgresql" if "postgres" in query.lower() else "sqlserver")
+        if request.deep_sql_automatic_mode:
+            # Dedicated deep-SQL path; normal planner and automatic agent remain unchanged.
+            steps = []
+            if any(path.lower().endswith(".pdf") for path in request.files):
+                steps.append(ToolCall(tool=ToolName.pdf, reason="Read source requirements before deep SQL investigation"))
+            if any(not path.lower().endswith(".pdf") for path in request.files):
+                steps.append(ToolCall(tool=ToolName.document, reason="Read source requirements before deep SQL investigation"))
+            steps.append(ToolCall(tool=ToolName.postgresql if engine == "postgresql" else ToolName.sql,
+                reason="Deep SQL loop: verify schema, relationships and categorical values before generating SQL"))
+            plan = ExecutionPlan(intent="deep_sql_investigation", steps=steps)
+        else:
+            plan = await self.planner.plan(query, request.files, memory, automatic_mode=request.automatic_mode, database_engine=engine)
+        for step in plan.steps:
+            if step.tool in {ToolName.sql, ToolName.postgresql}:
+                step.tool = ToolName.postgresql if engine == "postgresql" else ToolName.sql
         if request.automatic_mode:
             plan.clarification_questions, plan.clarification_options = [], []
             # Read source requirements before generating database queries.
-            plan.steps.sort(key=lambda step: step.tool == ToolName.sql)
+            plan.steps.sort(key=lambda step: step.tool in {ToolName.sql, ToolName.postgresql})
+        elif request.defer_database_execution:
+            plan.steps.sort(key=lambda step: step.tool in {ToolName.sql, ToolName.postgresql})
         selected = [{"tool": step.tool.value, "purpose": step.reason} for step in plan.steps if step.tool != ToolName.direct]
         tool_mode = "No tools" if not selected else ("Single tool" if len(selected) == 1 else "Multiple tools")
         await progress("Planning and tool selection", "Completed", tool_mode, tools=selected, tool_mode=tool_mode)
@@ -139,8 +162,22 @@ class AgentOrchestrator:
             if step.tool == ToolName.direct:
                 continue
             await progress(f"Tool: {step.tool.value}", "In Progress", step.reason)
-            if step.tool == ToolName.sql and request.automatic_mode:
-                result = await self.database_agent.answer(query, memory, results)
+            if request.deep_sql_automatic_mode and step.tool in {ToolName.sql, ToolName.postgresql}:
+                defaults = get_settings()
+                tool = self.sql_tool
+                if request.database or step.tool == ToolName.postgresql:
+                    tool = database_tool(defaults, request.database or DatabaseConfig(engine=engine))
+                agent = DeepSqlAgent(self.llm, tool, max_rounds=defaults.deep_sql_max_rounds,
+                    distinct_limit=defaults.deep_sql_distinct_limit,
+                    step_seconds=defaults.deep_sql_step_seconds, large_step_seconds=defaults.deep_sql_large_step_seconds,
+                    large_token_threshold=defaults.deep_sql_large_token_threshold)
+                result = await agent.answer(query, memory, results)
+            elif step.tool in {ToolName.sql, ToolName.postgresql} and (request.automatic_mode or request.defer_database_execution or step.tool == ToolName.postgresql or request.database):
+                agent = self.database_agent
+                if request.database or step.tool == ToolName.postgresql:
+                    config = request.database or DatabaseConfig(engine=engine)
+                    agent = DatabaseAgent(self.llm, database_tool(get_settings(), config))
+                result = await agent.answer(query, memory, results, generate_only=request.defer_database_execution)
             elif step.tool == ToolName.rag and request.session_id in self.session_rag:
                 result = await asyncio.to_thread(asyncio.run, self.session_rag[request.session_id].answer(query + "\n" + memory))
             else:
@@ -160,7 +197,30 @@ class AgentOrchestrator:
         options = plan.clarification_options
         status = "answered"
         await progress("Generate final answer", "In Progress", "Assessing evidence, SQL intent and answer accuracy")
-        if questions:
+        drafts = [r for r in results if r.success and isinstance(r.output, dict) and r.output.get("ready_to_execute")]
+        if drafts and not validation_issues:
+            # Reviewable query only: neither a data query nor an answer-generation call.
+            questions, options = [], []
+            status = "query_ready"
+            answer = "Query generated and checked against the database schema. Review or edit it, then click Execute."
+            for draft in drafts:
+                answer += "\n\n```sql\n" + draft.output["sql"] + "\n```"
+                if draft.output.get("assumptions"):
+                    answer += "\n\nAssumptions: " + json.dumps(draft.output["assumptions"], ensure_ascii=False)
+        elif request.deep_sql_automatic_mode:
+            questions, options = [], []
+            status = "error" if validation_issues else "insufficient_evidence"
+            limitations = [r.output.get("limitation") for r in results if isinstance(r.output, dict) and r.output.get("limitation")]
+            answer = "Deep SQL Automatic Mode could not establish a verified query. " + (" ".join(limitations) if limitations else "Check database access and supporting evidence.")
+            if not validation_issues:
+                for item in results:
+                    if isinstance(item.output, dict) and item.output.get('clarification_questions'):
+                        questions = item.output['clarification_questions']
+                        options = item.output.get('clarification_options', [])
+                        status = "needs_clarification"
+                        answer = question_answer(questions, options)
+                        break
+        elif questions:
             answer = question_answer(questions, options)
         elif validation_issues:
             status = "error"
@@ -171,7 +231,9 @@ class AgentOrchestrator:
             answer = assessment["answer"]
             options = assessment.get("clarification_options", [])
             status = assessment.get("status", "answered")
-        if request.automatic_mode:
+        if request.deep_sql_automatic_mode and not questions:
+            self.memory.pending.pop(request.session_id, None)
+        if request.automatic_mode and not request.deep_sql_automatic_mode:
             questions, options = [], []
             for result in results:
                 if result.tool == ToolName.sql and result.success and isinstance(result.output, dict) and "row_count" in result.output:
@@ -190,7 +252,7 @@ class AgentOrchestrator:
             self.memory.pending.pop(request.session_id, None)
         if questions:
             self.memory.pending[request.session_id] = query
-        elif status == "answered":
+        elif status in {"answered", "query_ready"}:
             self.memory.pending.pop(request.session_id, None)
         output_guardrail = self.guardrails.validate_output(answer)
         citations = [citation for result in results for citation in result.citations]

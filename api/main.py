@@ -1,9 +1,10 @@
 from pathlib import Path
 from uuid import uuid4
+import asyncio
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, FileResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -13,11 +14,13 @@ from starlette.requests import Request
 from app.dependencies import get_orchestrator
 from app_logging.structured import configure_logging, get_logger
 from config.settings import get_settings
-from models.schemas import ChatRequest, ChatResponse
+from models.schemas import ChatRequest, ChatResponse, DatabaseConfig, DatabaseExecuteRequest
 from monitoring.observability import CHAT_LATENCY, configure_tracing
 from tools.sql_tool import SqlServerTool
 from rag.pipeline import RagPipeline
 from services.chat_stream import chat_events
+from services.database_connections import database_tool, public_database_defaults
+from services.database_reports import DatabaseReports
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -38,6 +41,40 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("sample_data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+reports = DatabaseReports()
+
+
+@app.get("/database/defaults")
+async def database_defaults():
+    return public_database_defaults(settings)
+
+
+@app.post("/database/test")
+async def database_test(config: DatabaseConfig):
+    try:
+        tool = database_tool(settings, config)
+        await asyncio.to_thread(tool.execute_select, "SELECT 1 AS connected")
+        return {"connected": True}
+    except Exception:
+        return {"connected": False, "error": "Connection failed. Check host, database, authentication, driver and TLS settings."}
+
+
+@app.post("/database/execute")
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute")
+async def database_execute(request: Request, payload: DatabaseExecuteRequest):
+    try:
+        tool = database_tool(settings, payload.database)
+        return await asyncio.to_thread(reports.execute, tool, payload.sql, payload.session_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Query execution failed. Use one read-only SELECT with unique column aliases; verify SQL, connection settings and permissions.") from None
+
+
+@app.get("/database/reports/{report_id}")
+async def database_report(report_id: str, session_id: str):
+    path = reports.get(report_id, session_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Report not found or expired")
+    return FileResponse(path, media_type="text/csv", filename="database_report.csv", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")

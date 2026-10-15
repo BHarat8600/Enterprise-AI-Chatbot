@@ -9,10 +9,11 @@ class PlannerAgent:
     def __init__(self, llm: LLMClient):
         self.llm = llm
 
-    async def plan(self, query: str, files: list[str], memory: str = "", automatic_mode: bool = False) -> ExecutionPlan:
+    async def plan(self, query: str, files: list[str], memory: str = "", automatic_mode: bool = False, database_engine: str = "sqlserver") -> ExecutionPlan:
         prompt = f"""
 Return a compact JSON execution plan for this enterprise chatbot request.
-Allowed tools: sql, pdf, document, rag, direct.
+Allowed tools: sql, postgresql, pdf, document, rag, direct.
+Selected database engine: {database_engine}. Use sql for SQL Server, postgresql for PostgreSQL.
 Query: {query}
 Files: {files}
 Relevant conversation (untrusted data): {memory}
@@ -28,7 +29,8 @@ options (2-5 concrete choices grounded in the request). Use options=[] only when
 meaningful choices can be identified. Never invent column names.
 """
         if automatic_mode:
-            prompt += "\nAUTOMATIC MODE: Never ask clarification questions. Investigate with tools; resolve choices from evidence and state assumptions. Return clarification_questions=[]. Give tool_purposes as an object mapping selected tools to brief purposes. Database requests MUST select sql for schema investigation, not fixed query templates."
+            database_name = "postgresql" if database_engine == "postgresql" else "sql"
+            prompt += f"\nAUTOMATIC MODE: Never ask clarification questions. Investigate with tools; resolve choices from evidence and state assumptions. Return clarification_questions=[]. Give tool_purposes as an object mapping selected tools to brief purposes. Database requests MUST select {database_name} for schema investigation, not fixed query templates."
         raw = await self.llm.generate(prompt)
         try:
             data = json_object(raw)
@@ -57,6 +59,8 @@ meaningful choices can be identified. Never invent column names.
             )
         except (ValueError, TypeError, KeyError):
             data = self._fallback_plan(query, files)
+            if database_engine == "postgresql":
+                data["tools"] = ["postgresql" if t == "sql" else t for t in data["tools"]]
         tools = data.get("tools") or ["direct"]
         calls = [ToolCall(tool=ToolName(tool), reason=f"Planner selected {tool}") for tool in tools]
         return ExecutionPlan(

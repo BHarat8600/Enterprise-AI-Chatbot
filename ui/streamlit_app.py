@@ -5,6 +5,7 @@ from uuid import uuid4
 import httpx
 import pandas as pd
 import streamlit as st
+from ui.database_panel import connection_panel, executor_panel
 
 st.set_page_config(page_title="Enterprise AI Chatbot", layout="wide")
 API_URL = st.sidebar.text_input("API URL", "http://localhost:8000")
@@ -17,16 +18,33 @@ if "messages" not in st.session_state:
 if "uploaded_paths" not in st.session_state:
     st.session_state.uploaded_paths = []
 
+
+def select_automatic_mode():
+    if st.session_state.automatic_mode:
+        st.session_state.deep_sql_automatic_mode = False
+
+
+def select_deep_sql_mode():
+    if st.session_state.deep_sql_automatic_mode:
+        st.session_state.automatic_mode = False
+
 with st.sidebar:
-    automatic_mode = st.toggle("Automatic Mode", value=False,
+    automatic_mode = st.toggle("Automatic Mode", value=False, key="automatic_mode", on_change=select_automatic_mode,
         help="Investigate independently without clarification questions. Database requests inspect the live schema and validate generated SQL.")
+    deep_sql_mode = st.toggle("Deep SQL Automatic Mode", value=False, key="deep_sql_automatic_mode", on_change=select_deep_sql_mode,
+        help="Investigate schema, relationships, values and diagnostic queries; try alternative approaches, then ask focused questions if business ambiguity remains.")
+    if deep_sql_mode:
+        st.caption("Deep steps stay visible for at least 15 seconds, or 30 seconds at 4,000+ tokens. Each step shows its investigation question and evidence outcome. Final reports still use Execute.")
     if st.button("New Chat", use_container_width=True):
         st.session_state.session_id = str(uuid4())
         st.session_state.messages = []
         st.session_state.uploaded_paths = []
         st.session_state.pop("last_response", None)
+        for key in ["query_database", "database_execution", "query_revision"]:
+            st.session_state.pop(key, None)
         st.rerun()
     st.caption(f"Chat: {st.session_state.session_id[:8]}")
+    database_config = connection_panel(API_URL)
     st.subheader("Files")
     uploads = st.file_uploader("Upload documents", key=f"uploads-{st.session_state.session_id}", accept_multiple_files=True, type=["pdf", "txt", "md", "docx", "csv", "xlsx"])
     if st.button("Upload", use_container_width=True) and uploads:
@@ -41,8 +59,8 @@ with st.sidebar:
     for path in st.session_state.uploaded_paths:
         st.caption(Path(path).name)
 
-    st.subheader("Diagnostics")
-    if st.button("Check SQL", use_container_width=True):
+    st.subheader("Default SQL Server diagnostics")
+    if st.button("Check default SQL Server", use_container_width=True):
         try:
             config_response = httpx.get(f"{API_URL}/config/status", timeout=10)
             sql_response = httpx.get(f"{API_URL}/sql/health", timeout=20)
@@ -77,10 +95,11 @@ with left:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-    prompt = st.chat_input("Ask about documents, SQL Server, or enterprise knowledge")
+    prompt = st.chat_input("Ask about documents, SQL Server, PostgreSQL, or enterprise knowledge")
+    prompt = st.session_state.pop("query_revision", None) or prompt
     clarification_data = st.session_state.get("last_response", {})
     choices = clarification_data.get("clarification_options", [])
-    if not automatic_mode and clarification_data.get("status") == "needs_clarification" and choices:
+    if (not automatic_mode or deep_sql_mode) and clarification_data.get("status") == "needs_clarification" and choices:
         with st.form(f"clarification-{len(st.session_state.messages)}"):
             replies = []
             for i, item in enumerate(choices):
@@ -100,7 +119,8 @@ with left:
                     st.warning("Please answer each clarification before submitting.")
     if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
-        payload = {"query": prompt, "session_id": st.session_state.session_id, "files": st.session_state.uploaded_paths, "automatic_mode": automatic_mode}
+        payload = {"query": prompt, "session_id": st.session_state.session_id, "files": st.session_state.uploaded_paths, "automatic_mode": automatic_mode,
+            "database": database_config, "defer_database_execution": True, "deep_sql_automatic_mode": deep_sql_mode}
         st.markdown("**Live Agent Progress**")
         current_step = st.empty()
         tool_summary = st.empty()
@@ -115,9 +135,11 @@ with left:
                         continue
                     event = json.loads(line)
                     if event.get("type") == "progress":
-                        progress_rows[event["step"]] = {"Step": event["step"], "Status": event["status"], "Details": event.get("detail", "")}
+                        progress_rows[event["step"]] = {"Step": event["step"], "Status": event["status"],
+                            "Investigation question": event.get("question", ""), "Evidence / outcome": event.get("outcome", event.get("detail", "")),
+                            "Seconds": event.get("elapsed_seconds"), "Tokens": event.get("step_tokens")}
                         if event["status"] == "In Progress":
-                            current_step.info(f"Currently: {event['step']} — {event.get('detail', '')}")
+                            current_step.info(f"Currently: {event['step']} — {event.get('question') or event.get('detail', '')}")
                         if "tools" in event:
                             tool_summary.markdown("**" + event["tool_mode"] + "**\n\n" + "\n\n".join(f"- **{item['tool']}**: {item['purpose']}" for item in event["tools"]))
                         progress_table.dataframe(pd.DataFrame(progress_rows.values()), hide_index=True, use_container_width=True)
@@ -129,6 +151,8 @@ with left:
                 raise ValueError("Invalid chat response")
             st.session_state.messages.append({"role": "assistant", "content": data["answer"]})
             st.session_state.last_response = data
+            st.session_state.query_database = dict(database_config)
+            st.session_state.pop("database_execution", None)
         except (httpx.HTTPError, ValueError):
             st.session_state.messages.append({"role": "assistant", "content": "The request could not be completed. Check that the API is running, then retry your question. Your chat is still available."})
         st.rerun()
@@ -141,7 +165,9 @@ with right:
             progress_events = [item for item in data["timeline"] if item.get("type") == "progress"]
             if progress_events:
                 latest = {item["step"]: item for item in progress_events}
-                st.dataframe(pd.DataFrame([{"Step": item["step"], "Status": item["status"], "Details": item.get("detail", "")} for item in latest.values()]), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame([{"Step": item["step"], "Status": item["status"],
+                    "Investigation question": item.get("question", ""), "Evidence / outcome": item.get("outcome", item.get("detail", "")),
+                    "Seconds": item.get("elapsed_seconds"), "Tokens": item.get("step_tokens")} for item in latest.values()]), hide_index=True, use_container_width=True)
             st.json(data["timeline"])
         with tabs[1]:
             contexts = []
@@ -152,10 +178,11 @@ with right:
             st.dataframe(pd.DataFrame(contexts))
             st.json(data["citations"])
         with tabs[2]:
-            sql_outputs = [r for r in data["tool_results"] if r["tool"] == "sql"]
+            executor_panel(API_URL, data, database_config, st.session_state.session_id)
+            sql_outputs = [r for r in data["tool_results"] if r["tool"] in {"sql", "postgresql"}]
             for result in sql_outputs:
                 output = result.get("output")
-                if result.get("success") and isinstance(output, dict) and "column_count" in output:
+                if result.get("success") and isinstance(output, dict) and "column_count" in output and "row_count" in output:
                     st.code(output["sql"], language="sql")
                     st.caption(f"Total rows: {output['row_count']} · Total columns: {output['column_count']}")
                     st.dataframe(pd.DataFrame(output["rows"], columns=output["columns"]), hide_index=True)

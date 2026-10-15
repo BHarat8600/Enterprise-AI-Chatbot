@@ -1,6 +1,13 @@
 Automatic Mode
 ==============
 
+The current Streamlit UI generates and validates SQL first, then waits for the
+**Execute** button. Execution returns five preview rows and a complete CSV without
+sending results to the LLM. The automatic execution behavior below describes
+legacy API clients that omit `defer_database_execution=true`.
+See [database_workspace.md](database_workspace.md) for connection overrides,
+PostgreSQL, editing queries, and downloads.
+
 Enable Automatic Mode in the Streamlit sidebar. It applies to the next message
 and remains enabled until switched off. Manual mode keeps option-based
 clarification. Automatic mode never returns clarification questions; unresolved
